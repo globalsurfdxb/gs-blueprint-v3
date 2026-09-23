@@ -1,0 +1,622 @@
+// GS Blueprint — v1 data model
+// Source: GS_Blueprint_PRD.docx (product renamed in PRD v1.12; data model unchanged)
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Enums ----------
+
+enum RoleName {
+  ADMIN
+  CLUSTER_HEAD
+  LEAD
+  ACCOUNT_CLIENT_SERVICES
+  CONTRIBUTOR
+  ACCOUNTANT
+}
+
+enum Location {
+  DUBAI
+  INDIA
+}
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  NEW
+  IN_PROGRESS
+  REVIEW
+  REVISION
+  COMPLETED
+  ON_HOLD
+}
+
+// QA / Bug Tracking (PRD 8.2.4). A Bug is NOT a separate entity — it's a Task Type on the
+// existing Task, reusing Task Groups, Handoff, Comments, Time Tracking and the Status
+// Workflow. These enums carry only the handful of additive Bug-only fields.
+enum TaskType {
+  STANDARD
+  BUG
+}
+
+enum BugSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum BugEnvironment {
+  FRONTEND
+  BACKEND
+  BOTH
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  DUE_TOMORROW
+  OVERDUE
+  MOVED_TO_REVISION
+  COMPLETED
+  COMMENT_ADDED
+  SUBMITTED_FOR_REVIEW
+  PROJECT_ASSIGNED
+  TASK_HANDOFF_RECEIVED
+}
+
+enum StudioTicketStatus {
+  OPEN
+  CLOSED
+}
+
+enum HoursAllocationType {
+  ONE_TIME
+  MONTHLY
+}
+
+// Agile Sprint Workflow (PRD 8.14, v1.29) — a Sprint's lifecycle. Planned → Active → Completed.
+enum SprintStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+}
+
+// ---------- Identity & org structure ----------
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  location     Location
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  roles                UserRole[]
+  clustersHeaded       Cluster[]           @relation("ClusterHead")
+  clientsOwned         Client[]            @relation("AccountOwner")
+  projectsCreated      Project[]           @relation("ProjectCreatedBy")
+  projectsManaged      Project[]           @relation("ProjectAccountManager")
+  projectsTracked      Project[]           @relation("ProjectDependencyTracker")
+  taskGroupsLed        TaskGroup[]         @relation("TaskGroupLead")
+  taskGroupsAdded      TaskGroup[]         @relation("TaskGroupAddedBy")
+  tasksAssigned        Task[]              @relation("TaskAssignee")
+  tasksCreated         Task[]              @relation("TaskCreatedBy")
+  tasksCalendarApproved Task[]             @relation("TaskCalendarApprovedBy")
+  sprintsCreated       Sprint[]            @relation("SprintCreatedBy")
+  timeLogs             TimeLog[]
+  timeLogsEdited       TimeLog[]           @relation("TimeLogEditedBy")
+  taskStatusEvents     TaskStatusEvent[]   @relation("TaskStatusEventBy")
+  bugImagesAdded       BugImage[]          @relation("BugImageAddedBy")
+  comments             Comment[]
+  taskAttachments      TaskAttachment[]
+  projectAttachments   ProjectAttachment[]
+  notifications        Notification[]
+  studioTicketsRaised  StudioTicket[]      @relation("TicketRaisedBy")
+  studioTicketsHandled StudioTicket[]      @relation("TicketAssignedStudioUser")
+  monthlyBriefsCreated MonthlyBrief[]
+
+  @@map("users")
+}
+
+model Cluster {
+  id            String  @id @default(cuid())
+  name          String  @unique
+  clusterHead   User?   @relation("ClusterHead", fields: [clusterHeadId], references: [id])
+  clusterHeadId String? @map("cluster_head_id")
+
+  pods                  Pod[]
+  userRoles             UserRole[]
+  projects              Project[]
+  taskGroups            TaskGroup[]
+  studioTicketsRaisedBy StudioTicket[] @relation("RequestingCluster")
+
+  @@map("clusters")
+}
+
+model Pod {
+  id        String  @id @default(cuid())
+  clusterId String  @map("cluster_id")
+  cluster   Cluster @relation(fields: [clusterId], references: [id])
+  name      String
+  // Admin-managed per-discipline toggle (PRD 8.2.4): only when a pod has this on does the
+  // Task Type / Bug field appear on its Task Groups' create-task screen. Defaults on for
+  // Dev, off for every other discipline (QA is a Contributor role inside Dev, not its own
+  // pod — PRD v1.18).
+  bugTrackingEnabled Boolean @default(false) @map("bug_tracking_enabled")
+  // Admin-managed per-discipline toggle (PRD 8.12): only when a pod has this on does the
+  // rich-text Content Body field appear on its Task Groups' tasks. Defaults on for Content,
+  // off for every other discipline. Same settings pattern as bugTrackingEnabled.
+  contentBodyEnabled Boolean @default(false) @map("content_body_enabled")
+  // Admin-managed per-discipline toggle (PRD 8.14, v1.29): only when a pod has this on does the
+  // optional Sprint field appear on its Task Groups' tasks and the Sprint filters/board options
+  // become available. Defaults on for Development, off for every other discipline. Same settings
+  // pattern as bugTrackingEnabled / contentBodyEnabled.
+  sprintWorkflowEnabled Boolean @default(false) @map("sprint_workflow_enabled")
+
+  userRoles               UserRole[]
+  taskGroups              TaskGroup[]
+  clusterHeadRestrictions UserRolePod[]
+
+  @@unique([clusterId, name])
+  @@map("pods")
+}
+
+// One role per user (each optionally scoped to a cluster and/or pod) — `userId` is unique
+// below, so a user has at most a single UserRole row, edited in place via changeUserRole
+// rather than added/removed independently.
+model UserRole {
+  id        String   @id @default(cuid())
+  userId    String   @unique @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  role      RoleName
+  clusterId String?  @map("cluster_id")
+  cluster   Cluster? @relation(fields: [clusterId], references: [id])
+  podId     String?  @map("pod_id")
+  pod       Pod?     @relation(fields: [podId], references: [id])
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Optional pod restriction for a CLUSTER_HEAD role only — empty means full-cluster
+  // access. Meaningless for every other role (Lead/Contributor already use podId above;
+  // Admin/Accountant/ACS are never pod-scoped).
+  restrictedPods UserRolePod[]
+
+  @@map("user_roles")
+}
+
+// Zero-or-more rows = a Cluster Head's pod restriction (multi-select). No rows for a
+// given UserRole means unrestricted, full-cluster access — the default.
+model UserRolePod {
+  id         String   @id @default(cuid())
+  userRoleId String   @map("user_role_id")
+  userRole   UserRole @relation(fields: [userRoleId], references: [id])
+  podId      String   @map("pod_id")
+  pod        Pod      @relation(fields: [podId], references: [id])
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([userRoleId, podId])
+  @@map("user_role_pods")
+}
+
+// ---------- Delivery entities ----------
+
+model Client {
+  id             String   @id @default(cuid())
+  name           String
+  industry       String?
+  contactPerson  String?  @map("contact_person")
+  contactEmail   String?  @map("contact_email")
+  accountOwnerId String?  @map("account_owner_id")
+  accountOwner   User?    @relation("AccountOwner", fields: [accountOwnerId], references: [id])
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  projects Project[]
+
+  @@map("clients")
+}
+
+model ServiceType {
+  id   String @id @default(cuid())
+  name String @unique
+
+  projects Project[]
+
+  @@map("service_types")
+}
+
+// Admin-managed settings list (Social Media Content Calendar) — no hardcoded values.
+// contentLeadTimeDays must be greater than designLeadTimeDays (Content is always due
+// earlier, giving Design a working window before Publish Date), enforced in the action layer.
+model ContentType {
+  id                  String   @id @default(cuid())
+  name                String   @unique
+  contentLeadTimeDays Int      @map("content_lead_time_days")
+  designLeadTimeDays  Int      @map("design_lead_time_days")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  calendarTasks Task[]
+
+  @@map("content_types")
+}
+
+// One free-text brief per Project + Month + Year, set by that project's Social Media
+// Lead — shown read-only on every task generated from that month's Content Calendar via
+// Task.monthlyBriefId, so shared context isn't repeated per task.
+model MonthlyBrief {
+  id          String   @id @default(cuid())
+  projectId   String   @map("project_id")
+  project     Project  @relation(fields: [projectId], references: [id])
+  month       Int
+  year        Int
+  text        String
+  createdById String   @map("created_by_id")
+  createdBy   User     @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tasks Task[]
+
+  @@unique([projectId, month, year])
+  @@map("monthly_briefs")
+}
+
+model Project {
+  id                  String               @id @default(cuid())
+  name                String
+  clientId            String               @map("client_id")
+  client              Client               @relation(fields: [clientId], references: [id])
+  serviceTypeId       String               @map("service_type_id")
+  serviceType         ServiceType          @relation(fields: [serviceTypeId], references: [id])
+  clusterId           String               @map("cluster_id")
+  cluster             Cluster              @relation(fields: [clusterId], references: [id])
+  referenceNumber     String?              @map("reference_number") // free text, no format/uniqueness enforced — PRD v1.1 decision
+  summary             String?
+  startDate           DateTime?            @map("start_date")
+  deadline            DateTime?
+  status              ProjectStatus        @default(PLANNING)
+  maxAllocatedHours   Decimal?             @map("max_allocated_hours")
+  hoursAllocationType HoursAllocationType? @map("hours_allocation_type")
+  // Account/Client Services owner for this project — assignable/unassignable, restricted
+  // to ACS users scoped to the Project Delivery & Client Services cluster.
+  accountManagerId    String?              @map("account_manager_id")
+  accountManager      User?                @relation("ProjectAccountManager", fields: [accountManagerId], references: [id])
+  // Dependency Tracker (PRD 8.13, v1.26) — a SECOND, separate per-project designation: a
+  // view-only coordinator who sees only this project's cross-group-linked tasks (predecessor/
+  // successor). Distinct from accountManager; assigned by Admin or the owning Cluster Head.
+  dependencyTrackerId String?              @map("dependency_tracker_id")
+  dependencyTracker   User?                @relation("ProjectDependencyTracker", fields: [dependencyTrackerId], references: [id])
+  // Soft-delete: an archived project is hidden from every listing, dashboard and report
+  // but keeps all its tasks, time logs and calendar history. Admin-only; reversible.
+  archivedAt          DateTime?            @map("archived_at")
+  createdById         String               @map("created_by_id")
+  createdBy           User                 @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+
+  tasks         Task[]
+  studioTickets StudioTicket[]
+  taskGroups    TaskGroup[]
+  attachments   ProjectAttachment[]
+  monthlyBriefs MonthlyBrief[]
+  sprints       Sprint[]
+  milestones    Milestone[]
+
+  @@map("projects")
+}
+
+// Project Milestones (PRD — agency-wide) — a short, manually-created, ordered checklist of the
+// real checkpoints on a project (client sign-off, campaign live, report delivered), sitting
+// above the Task Groups. Belongs to exactly one project; never linked to a Task Group, a Task,
+// or Cross-Group Handoff. Completing a milestone is a manual act and has no effect on any task.
+model Milestone {
+  id        String   @id @default(cuid())
+  projectId String   @map("project_id")
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title     String
+  dueDate   DateTime @map("due_date")
+  completed Boolean  @default(false)
+  order     Int
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([projectId])
+  @@map("milestones")
+}
+
+// Agile Sprint Workflow (PRD 8.14, v1.29) — a Sprint is project-scoped (never pod-wide or
+// cross-project) with variable, per-project length: Start/End dates are set once and don't
+// change until it completes. A Task's optional Sprint FK groups it into a Sprint; no Sprint =
+// Backlog. Sprint is a planning/filter field, not a workflow gate — nothing blocks work on a
+// Backlog task.
+model Sprint {
+  id        String       @id @default(cuid())
+  projectId String       @map("project_id")
+  project   Project      @relation(fields: [projectId], references: [id])
+  name      String
+  startDate DateTime     @map("start_date")
+  endDate   DateTime     @map("end_date")
+  status    SprintStatus @default(PLANNED)
+  createdById String     @map("created_by_id")
+  createdBy   User       @relation("SprintCreatedBy", fields: [createdById], references: [id])
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  tasks Task[]
+
+  @@map("sprints")
+}
+
+// Project-level shared documentation links — multiple, labeled OneDrive links per
+// project (distinct from per-task attachments), e.g. brief, brand assets, reporting sheet.
+model ProjectAttachment {
+  id        String    @id @default(cuid())
+  projectId String    @map("project_id")
+  project   Project   @relation(fields: [projectId], references: [id])
+  url       String
+  label     String?
+  addedById String    @map("added_by_id")
+  addedBy   User      @relation(fields: [addedById], references: [id])
+  isEdited  Boolean   @default(false) @map("is_edited")
+  editedAt  DateTime? @map("edited_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("project_attachments")
+}
+
+// A project is divided into discipline Task Groups — one per attached Lead. Attaching a
+// Lead (choosing one of their cluster/pod-scoped Lead role instances) creates their group.
+// A Lead only has task-creation/assignment/review authority within their own group; the
+// project's home-cluster Cluster Head, Admin, and Account/Client Services see and manage
+// every group on the project. `clusterId` snapshots the discipline's home cluster at
+// attach time (independent of the project's own cluster) so a cross-cluster Lead's
+// assignable-member pool is computed correctly. Group membership is managed by Admin or
+// the project's home-cluster Cluster Head/Account-Client-Services — never by a Lead
+// unilaterally.
+model TaskGroup {
+  id         String   @id @default(cuid())
+  projectId  String   @map("project_id")
+  project    Project  @relation(fields: [projectId], references: [id])
+  name       String
+  leadUserId String   @map("lead_user_id")
+  lead       User     @relation("TaskGroupLead", fields: [leadUserId], references: [id])
+  clusterId  String?  @map("cluster_id")
+  cluster    Cluster? @relation(fields: [clusterId], references: [id])
+  podId      String?  @map("pod_id")
+  pod        Pod?     @relation(fields: [podId], references: [id])
+  // Agile Sprint Workflow enhancement (v1.29+) — a static, manually-set planned-capacity
+  // number in hours per week, distinct from actual hours logged via the timer. Set by
+  // Admin/Cluster Head, Development/QA teams only, blank by default. Feeds the (still-held)
+  // Developer Utilization report; idle until that report is built.
+  capacityHoursPerWeek Decimal? @map("capacity_hours_per_week")
+  addedById  String?  @map("added_by_id")
+  addedBy    User?    @relation("TaskGroupAddedBy", fields: [addedById], references: [id])
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tasks Task[]
+
+  @@unique([projectId, leadUserId])
+  @@map("task_groups")
+}
+
+model Task {
+  id                String        @id @default(cuid())
+  projectId         String        @map("project_id")
+  project           Project       @relation(fields: [projectId], references: [id])
+  groupId           String?       @map("group_id")
+  group             TaskGroup?    @relation(fields: [groupId], references: [id])
+  parentTaskId      String?       @map("parent_task_id")
+  parentTask        Task?         @relation("Subtasks", fields: [parentTaskId], references: [id])
+  subtasks          Task[]        @relation("Subtasks")
+  // Agile Sprint Workflow (PRD 8.14, v1.29) — optional; no Sprint = Backlog. Surfaced only on
+  // tasks whose discipline (pod) has sprintWorkflowEnabled. Never a workflow gate.
+  sprintId          String?       @map("sprint_id")
+  sprint            Sprint?       @relation(fields: [sprintId], references: [id])
+  name              String
+  description       String?
+  // Nullable to support cross-group handoff: a handed-off task is created unassigned —
+  // the receiving group's Lead performs the actual assignment as a deliberate next step.
+  assignedToId      String?       @map("assigned_to_id")
+  assignedTo        User?         @relation("TaskAssignee", fields: [assignedToId], references: [id])
+  priority          TaskPriority  @default(MEDIUM)
+  dueDate           DateTime      @map("due_date")
+  status            TaskStatus    @default(NEW)
+  onHoldFromStatus  TaskStatus?   @map("on_hold_from_status")
+  revisionCount     Int           @default(0) @map("revision_count")
+  // QA / Bug Tracking (PRD 8.2.4) — a Bug is just a Task Type, set once at creation and
+  // never changed. Severity/steps/environment are Bug-only (null on Standard tasks).
+  // revisionCount doubles as the Bug's "Reopen Count" — no separate field.
+  taskType          TaskType         @default(STANDARD) @map("task_type")
+  severity          BugSeverity?
+  stepsToReproduce  String?          @map("steps_to_reproduce")
+  environment       BugEnvironment?
+  // Content Body (PRD 8.12) — a rich-text field holding the actual copy, edited by the task's
+  // current assignee. Sanitized HTML (basic formatting only). Only surfaced on tasks whose
+  // discipline has Pod.contentBodyEnabled; null everywhere else. No version history (overwrites).
+  contentBody       String?          @map("content_body")
+  statusEvents      TaskStatusEvent[]
+  bugImages         BugImage[]
+  completedAt       DateTime?     @map("completed_at")
+  // Cross-group handoff chain — v1 is a straight chain (one predecessor, one successor):
+  // @unique on predecessorTaskId means no two tasks can share the same predecessor, so a
+  // completed task can be sent to a next group at most once.
+  predecessorTaskId String?       @unique @map("predecessor_task_id")
+  predecessorTask   Task?         @relation("TaskChain", fields: [predecessorTaskId], references: [id])
+  successorTask     Task?         @relation("TaskChain")
+  // Content Calendar (Social Media pod, v1) — set only on a task that originated from a
+  // calendar entry (the Content task) or was handed off from one (the Design task). The
+  // handoff's due-date auto-calculation and Monthly Brief carry-forward both key off
+  // publishDate/contentTypeId being non-null to distinguish these from ordinary tasks.
+  publishDate       DateTime?     @map("publish_date")
+  contentTypeId     String?       @map("content_type_id")
+  contentType       ContentType?  @relation(fields: [contentTypeId], references: [id])
+  monthlyBriefId    String?       @map("monthly_brief_id")
+  monthlyBrief      MonthlyBrief? @relation(fields: [monthlyBriefId], references: [id])
+  // Final calendar sign-off: stamped when the project's Social Media Lead approves the
+  // completed Design-stage task — the last link in the Content Calendar chain (Content →
+  // Design), closing the loop back to whoever planned the calendar in the first place.
+  calendarApprovedAt   DateTime? @map("calendar_approved_at")
+  calendarApprovedById String?   @map("calendar_approved_by_id")
+  calendarApprovedBy   User?     @relation("TaskCalendarApprovedBy", fields: [calendarApprovedById], references: [id])
+  createdById       String        @map("created_by_id")
+  createdBy         User          @relation("TaskCreatedBy", fields: [createdById], references: [id])
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  timeLogs      TimeLog[]
+  comments      Comment[]
+  attachments   TaskAttachment[]
+  notifications Notification[]
+  studioTickets StudioTicket[]
+
+  @@map("tasks")
+}
+
+// Bug-scoped status-change log (PRD 8.2.4 §4): one row per status transition, but ONLY for
+// Bug-type tasks — it answers "when was it fixed / reopened". Deliberately narrow; this is
+// NOT the general audit log deferred in the PRD's Risk 4, so Standard tasks write nothing here.
+model TaskStatusEvent {
+  id          String     @id @default(cuid())
+  taskId      String     @map("task_id")
+  task        Task       @relation(fields: [taskId], references: [id])
+  status      TaskStatus
+  changedById String     @map("changed_by_id")
+  changedBy   User       @relation("TaskStatusEventBy", fields: [changedById], references: [id])
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  @@index([taskId])
+  @@map("task_status_events")
+}
+
+// Screenshot Attachments on Bugs (PRD 8.2.4 "Screenshot Attachments"). Images only
+// (PNG/JPG/WebP), max 3 per Bug, ≤5MB each — the binary lives in Vercel Blob Storage; only
+// the reference (url + pathname for deletion) is stored here. This is NOT the broader Phase 2
+// File & Attachment Management item — it's images, on Bug-type tasks only.
+model BugImage {
+  id          String   @id @default(cuid())
+  taskId      String   @map("task_id")
+  task        Task     @relation(fields: [taskId], references: [id])
+  url         String
+  pathname    String
+  filename    String
+  contentType String   @map("content_type")
+  addedById   String   @map("added_by_id")
+  addedBy     User     @relation("BugImageAddedBy", fields: [addedById], references: [id])
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([taskId])
+  @@map("bug_images")
+}
+
+model TimeLog {
+  id              String    @id @default(cuid())
+  taskId          String    @map("task_id")
+  task            Task      @relation(fields: [taskId], references: [id])
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id])
+  startTime       DateTime  @map("start_time")
+  endTime         DateTime? @map("end_time") // null while timer is running
+  durationSeconds Int?      @map("duration_seconds") // computed on stop
+
+  // Cluster-Head time-log correction (PRD 8.4). An edit is visibly flagged, never a silent
+  // overwrite: the ORIGINAL start/end/duration are snapshotted the first time the entry is
+  // edited, alongside who edited it, when, and a mandatory reason. All null until first edit.
+  editedAt                DateTime? @map("edited_at")
+  editedById              String?   @map("edited_by_id")
+  editedBy                User?     @relation("TimeLogEditedBy", fields: [editedById], references: [id])
+  editReason              String?   @map("edit_reason")
+  originalStartTime       DateTime? @map("original_start_time")
+  originalEndTime         DateTime? @map("original_end_time")
+  originalDurationSeconds Int?      @map("original_duration_seconds")
+
+  // One open timer (endTime = null) per user at a time — enforced in the service layer,
+  // which auto-stops any existing open timer for that user before starting a new one.
+  @@index([userId, endTime])
+  @@map("time_logs")
+}
+
+model Comment {
+  id        String    @id @default(cuid())
+  taskId    String    @map("task_id")
+  task      Task      @relation(fields: [taskId], references: [id])
+  authorId  String    @map("author_id")
+  author    User      @relation(fields: [authorId], references: [id])
+  text      String
+  isEdited  Boolean   @default(false) @map("is_edited")
+  editedAt  DateTime? @map("edited_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("comments")
+}
+
+model TaskAttachment {
+  id        String    @id @default(cuid())
+  taskId    String    @map("task_id")
+  task      Task      @relation(fields: [taskId], references: [id])
+  url       String
+  label     String?
+  addedById String    @map("added_by_id")
+  addedBy   User      @relation(fields: [addedById], references: [id])
+  isEdited  Boolean   @default(false) @map("is_edited")
+  editedAt  DateTime? @map("edited_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("task_attachments")
+}
+
+model Notification {
+  id               String           @id @default(cuid())
+  userId           String           @map("user_id")
+  user             User             @relation(fields: [userId], references: [id])
+  type             NotificationType
+  relatedTaskId    String?          @map("related_task_id")
+  relatedTask      Task?            @relation(fields: [relatedTaskId], references: [id])
+  relatedProjectId String?          @map("related_project_id")
+  message          String
+  isRead           Boolean          @default(false) @map("is_read")
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// Cross-cluster exception: Creative Studio ticketed intake.
+// While status = OPEN, Studio cluster members get read-only access to `project`
+// (enforced in the service layer — not a separate grants table).
+model StudioTicket {
+  id                   String             @id @default(cuid())
+  projectId            String             @map("project_id")
+  project              Project            @relation(fields: [projectId], references: [id])
+  taskId               String?            @map("task_id")
+  task                 Task?              @relation(fields: [taskId], references: [id])
+  raisedById           String             @map("raised_by_id")
+  raisedBy             User               @relation("TicketRaisedBy", fields: [raisedById], references: [id])
+  requestingClusterId  String             @map("requesting_cluster_id")
+  requestingCluster    Cluster            @relation("RequestingCluster", fields: [requestingClusterId], references: [id])
+  assignedStudioUserId String?            @map("assigned_studio_user_id")
+  assignedStudioUser   User?              @relation("TicketAssignedStudioUser", fields: [assignedStudioUserId], references: [id])
+  status               StudioTicketStatus @default(OPEN)
+  openedAt             DateTime           @default(now()) @map("opened_at")
+  closedAt             DateTime?          @map("closed_at")
+
+  @@map("studio_tickets")
+}

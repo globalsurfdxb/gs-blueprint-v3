@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #000000;
+
+  /* GS Digital brand tokens — see branding.md */
+  --gs-red: #e63e31;
+  --gs-black: #000000;
+  --gs-gray: #7a797c;
+  --gs-light: #f1f3f4;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-gs-red: var(--gs-red);
+  --color-gs-black: var(--gs-black);
+  --color-gs-gray: var(--gs-gray);
+  --color-gs-light: var(--gs-light);
+  --font-heading: var(--font-heading);
+  --font-body: var(--font-body);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+}
