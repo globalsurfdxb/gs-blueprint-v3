@@ -231,8 +231,17 @@ export async function deleteUser(userId: string, _formData: FormData) {
           clustersHeaded: true,
           clientsOwned: true,
           taskGroupsLed: true,
+          projectsManaged: true,
+          projectsTracked: true,
+          sprintsCreated: true,
+          tasksCalendarApproved: true,
+          timeLogsEdited: true,
+          taskStatusEvents: true,
+          bugImagesAdded: true,
+          monthlyBriefsCreated: true,
         },
       },
+      roles: { select: { id: true } },
     },
   });
   if (!user) throw new Error("User not found.");
@@ -245,6 +254,7 @@ export async function deleteUser(userId: string, _formData: FormData) {
   }
 
   await prisma.$transaction([
+    prisma.userRolePod.deleteMany({ where: { userRoleId: { in: user.roles.map((r) => r.id) } } }),
     prisma.userRole.deleteMany({ where: { userId } }),
     prisma.taskGroup.updateMany({ where: { addedById: userId }, data: { addedById: null } }),
     prisma.notification.deleteMany({ where: { userId } }),
