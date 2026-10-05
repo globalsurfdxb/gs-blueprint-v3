@@ -208,10 +208,14 @@ export async function changeUserRole(userId: string, userRoleId: string, formDat
  * deleting a user who has a real footprint would silently destroy other people's
  * project history. Deactivate (the Active checkbox) instead for anyone with history.
  */
-export async function deleteUser(userId: string, _formData: FormData) {
+export async function deleteUser(
+  userId: string,
+  _prevState: { error?: string } | undefined,
+  _formData: FormData,
+): Promise<{ error?: string }> {
   const admin = await requireAdmin();
   if (userId === admin.id) {
-    throw new Error("You can't delete your own account.");
+    return { error: "You can't delete your own account." };
   }
 
   const user = await prisma.user.findUnique({
@@ -244,13 +248,15 @@ export async function deleteUser(userId: string, _formData: FormData) {
       roles: { select: { id: true } },
     },
   });
-  if (!user) throw new Error("User not found.");
+  if (!user) return { error: "User not found." };
 
   const hasHistory = Object.values(user._count).some((n) => n > 0);
   if (hasHistory) {
-    throw new Error(
-      "This user has projects, tasks, Task Groups, or other activity tied to their account — deactivate them instead of deleting, to keep that history intact.",
-    );
+    return {
+      error: user.isActive
+        ? "This user has projects, tasks, Task Groups, or other activity tied to their account — deactivate them first, then use Reassign & delete to hand their work to another user."
+        : "This user has projects, tasks, Task Groups, or other activity tied to their account — use Reassign & delete below to hand their work to another user first.",
+    };
   }
 
   await prisma.$transaction([
@@ -260,6 +266,80 @@ export async function deleteUser(userId: string, _formData: FormData) {
     prisma.notification.deleteMany({ where: { userId } }),
     prisma.user.delete({ where: { id: userId } }),
   ]);
+
+  revalidatePath("/admin/users");
+  redirect("/admin/users");
+}
+
+/**
+ * Hands everything an INACTIVE user owns (projects, Task Groups, tasks, comments, time logs,
+ * attachments, etc.) to another active user, then hard-deletes the account. Admin-only.
+ * Task Groups are unique per (project, lead): where the target already leads a group in the
+ * same project, the tasks are merged into that group and the leaving user's group is removed.
+ */
+export async function reassignAndDeleteUser(
+  userId: string,
+  _prevState: { error?: string } | undefined,
+  formData: FormData,
+): Promise<{ error?: string }> {
+  const admin = await requireAdmin();
+  const targetId = String(formData.get("targetUserId") ?? "");
+
+  if (userId === admin.id) return { error: "You can't delete your own account." };
+  if (!targetId) return { error: "Choose a user to take over this work." };
+  if (targetId === userId) return { error: "Choose a different user." };
+
+  const [user, target] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, include: { roles: { select: { id: true } } } }),
+    prisma.user.findUnique({ where: { id: targetId } }),
+  ]);
+  if (!user) return { error: "User not found." };
+  if (user.isActive) return { error: "Deactivate this user first (untick Active and save), then reassign and delete." };
+  if (!target || !target.isActive) return { error: "The receiving user must be an active user." };
+
+  await prisma.$transaction(
+    async (tx) => {
+      const groups = await tx.taskGroup.findMany({ where: { leadUserId: userId } });
+      for (const group of groups) {
+        const existing = await tx.taskGroup.findUnique({
+          where: { projectId_leadUserId: { projectId: group.projectId, leadUserId: targetId } },
+        });
+        if (existing) {
+          await tx.task.updateMany({ where: { groupId: group.id }, data: { groupId: existing.id } });
+          await tx.taskGroup.delete({ where: { id: group.id } });
+        } else {
+          await tx.taskGroup.update({ where: { id: group.id }, data: { leadUserId: targetId } });
+        }
+      }
+
+      await tx.taskGroup.updateMany({ where: { addedById: userId }, data: { addedById: targetId } });
+      await tx.project.updateMany({ where: { createdById: userId }, data: { createdById: targetId } });
+      await tx.project.updateMany({ where: { accountManagerId: userId }, data: { accountManagerId: targetId } });
+      await tx.project.updateMany({ where: { dependencyTrackerId: userId }, data: { dependencyTrackerId: targetId } });
+      await tx.monthlyBrief.updateMany({ where: { createdById: userId }, data: { createdById: targetId } });
+      await tx.sprint.updateMany({ where: { createdById: userId }, data: { createdById: targetId } });
+      await tx.projectAttachment.updateMany({ where: { addedById: userId }, data: { addedById: targetId } });
+      await tx.task.updateMany({ where: { assignedToId: userId }, data: { assignedToId: targetId } });
+      await tx.task.updateMany({ where: { createdById: userId }, data: { createdById: targetId } });
+      await tx.task.updateMany({ where: { calendarApprovedById: userId }, data: { calendarApprovedById: targetId } });
+      await tx.taskStatusEvent.updateMany({ where: { changedById: userId }, data: { changedById: targetId } });
+      await tx.bugImage.updateMany({ where: { addedById: userId }, data: { addedById: targetId } });
+      await tx.taskAttachment.updateMany({ where: { addedById: userId }, data: { addedById: targetId } });
+      await tx.timeLog.updateMany({ where: { userId }, data: { userId: targetId } });
+      await tx.timeLog.updateMany({ where: { editedById: userId }, data: { editedById: targetId } });
+      await tx.comment.updateMany({ where: { authorId: userId }, data: { authorId: targetId } });
+      await tx.studioTicket.updateMany({ where: { raisedById: userId }, data: { raisedById: targetId } });
+      await tx.studioTicket.updateMany({ where: { assignedStudioUserId: userId }, data: { assignedStudioUserId: targetId } });
+      await tx.client.updateMany({ where: { accountOwnerId: userId }, data: { accountOwnerId: targetId } });
+      await tx.cluster.updateMany({ where: { clusterHeadId: userId }, data: { clusterHeadId: targetId } });
+
+      await tx.notification.deleteMany({ where: { userId } });
+      await tx.userRolePod.deleteMany({ where: { userRoleId: { in: user.roles.map((r) => r.id) } } });
+      await tx.userRole.deleteMany({ where: { userId } });
+      await tx.user.delete({ where: { id: userId } });
+    },
+    { timeout: 30000 },
+  );
 
   revalidatePath("/admin/users");
   redirect("/admin/users");

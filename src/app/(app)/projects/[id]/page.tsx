@@ -36,8 +36,10 @@ import {
   removeTaskGroup,
   archiveProject,
   unarchiveProject,
+  deleteProject,
 } from "@/lib/actions/projects";
 import { ArchiveProjectButton } from "./archive-project-button";
+import { DeleteProjectForm } from "./delete-project-form";
 import { UnarchiveProjectButton } from "../unarchive-project-button";
 import {
   addProjectAttachment,
@@ -192,6 +194,25 @@ export default async function ProjectDetailPage({
     },
   });
   if (!project) notFound();
+
+  let deleteSummary = "";
+  if (isAdmin(user)) {
+    const [counts, timeLogCount] = await Promise.all([
+      prisma.project.findUnique({
+        where: { id },
+        select: {
+          _count: {
+            select: { tasks: true, sprints: true, taskGroups: true, milestones: true, attachments: true, monthlyBriefs: true },
+          },
+        },
+      }),
+      prisma.timeLog.count({ where: { task: { projectId: id } } }),
+    ]);
+    const c = counts?._count;
+    deleteSummary = c
+      ? `${c.tasks} tasks, ${timeLogCount} time logs, ${c.sprints} sprints, ${c.taskGroups} task groups, ${c.milestones} milestones, ${c.attachments} project links and ${c.monthlyBriefs} monthly briefs, plus their comments, attachments and notifications`
+      : "";
+  }
 
   if (!(await canViewProject(user, project))) {
     redirect("/projects");
@@ -385,7 +406,7 @@ export default async function ProjectDetailPage({
       </div>
 
       {isAdmin(user) && (
-        <div className="mt-3">
+        <div className="mt-3 flex flex-wrap items-start gap-3">
           {project.archivedAt ? (
             <div className="flex flex-wrap items-center gap-3 rounded-md border border-gs-gray/20 bg-gs-light px-3 py-2 text-sm">
               <span className="text-gs-gray">This project is archived — hidden from listings and reports.</span>
@@ -394,6 +415,11 @@ export default async function ProjectDetailPage({
           ) : (
             <ArchiveProjectButton projectName={project.name} action={archiveProject.bind(null, project.id)} />
           )}
+          <DeleteProjectForm
+            projectName={project.name}
+            summary={deleteSummary}
+            action={deleteProject.bind(null, project.id)}
+          />
         </div>
       )}
 

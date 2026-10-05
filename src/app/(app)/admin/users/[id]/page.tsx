@@ -2,9 +2,10 @@ import { notFound, redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
 import { isAdmin } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { updateUser, changeUserRole, deleteUser } from "@/lib/actions/users";
+import { updateUser, changeUserRole, deleteUser, reassignAndDeleteUser } from "@/lib/actions/users";
 import { EditRoleForm } from "./edit-role-form";
 import { DeleteUserButton } from "./delete-user-button";
+import { ReassignDeleteForm } from "./reassign-delete-form";
 
 const ROLE_LABELS: Record<string, string> = {
   ADMIN: "Admin",
@@ -22,19 +23,36 @@ export default async function EditUserPage({ params }: { params: Promise<{ id: s
   }
 
   const { id } = await params;
-  const [user, clusters] = await Promise.all([
+  const [user, clusters, activeUsers] = await Promise.all([
     prisma.user.findUnique({
       where: { id },
       include: { roles: { include: { cluster: true, pod: true, restrictedPods: { include: { pod: true } } } } },
     }),
     prisma.cluster.findMany({ include: { pods: true }, orderBy: { name: "asc" } }),
+    prisma.user.findMany({
+      where: { isActive: true, id: { not: id } },
+      include: { roles: { include: { pod: true } } },
+      orderBy: { name: "asc" },
+    }),
   ]);
 
   if (!user) notFound();
 
   const updateUserWithId = updateUser.bind(null, user.id);
   const deleteUserWithId = deleteUser.bind(null, user.id);
+  const reassignAndDeleteWithId = reassignAndDeleteUser.bind(null, user.id);
   const canDelete = user.id !== currentUser.id;
+
+  const leavingRole = user.roles[0];
+  const sameRole = (u: (typeof activeUsers)[number]) =>
+    !!leavingRole && u.roles.some((r) => r.role === leavingRole.role && r.podId === leavingRole.podId);
+  const candidates = [...activeUsers]
+    .sort((a, b) => Number(sameRole(b)) - Number(sameRole(a)))
+    .map((u) => ({
+      id: u.id,
+      label: `${u.name} — ${u.roles[0] ? ROLE_LABELS[u.roles[0].role] : "No role"}${u.roles[0]?.pod ? ` · ${u.roles[0].pod.name}` : ""}${sameRole(u) ? " (same role)" : ""}`,
+    }));
+  const defaultTargetId = activeUsers.find(sameRole)?.id ?? "";
 
   return (
     <div className="max-w-2xl">
@@ -99,10 +117,20 @@ export default async function EditUserPage({ params }: { params: Promise<{ id: s
         <div className="mt-4">
           <DeleteUserButton userName={user.name} action={deleteUserWithId} />
           <p className="mt-2 text-xs text-gs-gray">
-            Only works for accounts with no projects, tasks, or other activity tied to them — use
-            the Active checkbox above to deactivate anyone with history instead.
+            Only works for accounts with no projects, tasks, or other activity tied to them. For
+            anyone with history, deactivate them (Active checkbox above), then use Reassign &amp;
+            delete.
           </p>
         </div>
+      )}
+
+      {canDelete && !user.isActive && (
+        <ReassignDeleteForm
+          userName={user.name}
+          candidates={candidates}
+          defaultTargetId={defaultTargetId}
+          action={reassignAndDeleteWithId}
+        />
       )}
 
       <div className="mt-8">

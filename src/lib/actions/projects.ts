@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { del } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/auth";
 import {
@@ -345,4 +346,73 @@ export async function unarchiveProject(projectId: string, _formData: FormData) {
 
   revalidatePath("/projects");
   revalidatePath(`/projects/${projectId}`);
+}
+
+/**
+ * Permanently deletes a project and everything attached to it — Task Groups, Sprints, Milestones,
+ * Monthly Briefs, project links, Studio tickets, and every task with its time logs, comments,
+ * attachments, status history, bug images and notifications. Admin only, irreversible; the
+ * caller must type the project's exact name. Prefer archiveProject when history should be kept.
+ */
+export async function deleteProject(
+  projectId: string,
+  _prevState: { error?: string } | undefined,
+  formData: FormData,
+): Promise<{ error?: string }> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "Not signed in." };
+  if (!isAdmin(user)) return { error: "Only an Admin can delete a project." };
+
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true, name: true } });
+  if (!project) return { error: "Project not found." };
+  if (String(formData.get("confirmName") ?? "").trim() !== project.name) {
+    return { error: "Type the project name exactly to confirm." };
+  }
+
+  const taskIds = (await prisma.task.findMany({ where: { projectId }, select: { id: true } })).map((t) => t.id);
+  const blobUrls = (
+    await prisma.bugImage.findMany({ where: { taskId: { in: taskIds } }, select: { url: true } })
+  ).map((b) => b.url);
+
+  await prisma.$transaction(
+    async (tx) => {
+      // Break task-to-task links (subtasks, handoff chain) so the tasks can be removed in any order.
+      await tx.task.updateMany({
+        where: { OR: [{ id: { in: taskIds } }, { parentTaskId: { in: taskIds } }, { predecessorTaskId: { in: taskIds } }] },
+        data: { parentTaskId: null, predecessorTaskId: null },
+      });
+
+      await tx.notification.deleteMany({
+        where: { OR: [{ relatedTaskId: { in: taskIds } }, { relatedProjectId: projectId }] },
+      });
+      await tx.studioTicket.deleteMany({ where: { OR: [{ projectId }, { taskId: { in: taskIds } }] } });
+      await tx.timeLog.deleteMany({ where: { taskId: { in: taskIds } } });
+      await tx.comment.deleteMany({ where: { taskId: { in: taskIds } } });
+      await tx.taskAttachment.deleteMany({ where: { taskId: { in: taskIds } } });
+      await tx.bugImage.deleteMany({ where: { taskId: { in: taskIds } } });
+      await tx.taskStatusEvent.deleteMany({ where: { taskId: { in: taskIds } } });
+      await tx.task.deleteMany({ where: { projectId } });
+      await tx.sprint.deleteMany({ where: { projectId } });
+      await tx.monthlyBrief.deleteMany({ where: { projectId } });
+      await tx.projectAttachment.deleteMany({ where: { projectId } });
+      await tx.milestone.deleteMany({ where: { projectId } });
+      await tx.taskGroup.deleteMany({ where: { projectId } });
+      await tx.project.delete({ where: { id: projectId } });
+    },
+    { timeout: 60000 },
+  );
+
+  // Screenshots live in Vercel Blob; remove any file no other bug image still points at.
+  for (const url of new Set(blobUrls)) {
+    if ((await prisma.bugImage.count({ where: { url } })) === 0) {
+      try {
+        await del(url);
+      } catch {
+        // best-effort: the database rows are already gone
+      }
+    }
+  }
+
+  revalidatePath("/projects");
+  redirect("/projects");
 }
