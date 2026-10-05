@@ -3,8 +3,9 @@ import { notFound, redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
 import { canManageClients, canViewProject, isAdmin, getEligibleAccountManagers } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { updateClient } from "@/lib/actions/clients";
+import { updateClient, deleteClient } from "@/lib/actions/clients";
 import { ClientForm } from "../client-form";
+import { DeleteClientForm } from "./delete-client-form";
 
 export default async function ClientDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await getCurrentUser();
@@ -52,6 +53,12 @@ export default async function ClientDetailPage({ params }: { params: Promise<{ i
           submitLabel="Save Changes"
         />
       </div>
+
+      {isAdmin(user) && (
+        <div className="mt-4">
+          <DeleteClientForm clientName={client.name} action={deleteClient.bind(null, client.id)} />
+        </div>
+      )}
 
       <div className="mt-8">
         <h2 className="text-sm font-semibold uppercase text-gs-gray">Projects</h2>

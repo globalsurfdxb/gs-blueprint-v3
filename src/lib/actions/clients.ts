@@ -87,3 +87,33 @@ export async function updateClient(clientId: string, formData: FormData) {
   revalidatePath(`/clients/${clientId}`);
   revalidatePath("/clients");
 }
+
+/**
+ * Permanently deletes a client — Admin only. Refused while the client still has projects
+ * (every project requires a client), so delete or reassign those projects first.
+ */
+export async function deleteClient(
+  clientId: string,
+  _prevState: { error?: string } | undefined,
+  _formData: FormData,
+): Promise<{ error?: string }> {
+  const user = await getCurrentUser();
+  if (!user || !isAdmin(user)) return { error: "Only an Admin can delete a client." };
+
+  const client = await prisma.client.findUnique({
+    where: { id: clientId },
+    select: { id: true, _count: { select: { projects: true } } },
+  });
+  if (!client) return { error: "Client not found." };
+  if (client._count.projects > 0) {
+    const n = client._count.projects;
+    return {
+      error: `This client still has ${n} project${n === 1 ? "" : "s"} (including archived ones). Delete those projects first, then delete the client.`,
+    };
+  }
+
+  await prisma.client.delete({ where: { id: clientId } });
+
+  revalidatePath("/clients");
+  redirect("/clients");
+}
